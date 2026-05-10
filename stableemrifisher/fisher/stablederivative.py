@@ -144,7 +144,7 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 self.cache["phase_coefficients"],
                 self.cache["ls_all"],
                 self.cache["ms_all"],
-                # self.cache['ks_all'], #no inclination in FEW 2.0 :(
+                self.cache["ks_all"],  # 1PAT1R modification: k_arr now required by InterpolatedModeSum
                 self.cache["ns_all"],
                 dt=dt,
                 T=T,
@@ -181,7 +181,7 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 self.cache["phase_coefficients"],
                 self.cache["ls_all"],
                 self.cache["ms_all"],
-                # self.cache['ks_all'],
+                self.cache["ks_all"],  # 1PAT1R modification: k_arr now required by InterpolatedModeSum
                 self.cache["ns_all"],
                 dt=dt,
                 T=T,
@@ -208,7 +208,7 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 self.cache["phase_coefficients"],
                 self.cache["ls_all"],
                 self.cache["ms_all"],
-                # self.cache['ks_all'],
+                self.cache["ks_all"],  # 1PAT1R modification: k_arr now required by InterpolatedModeSum
                 self.cache["ns_all"],
                 dt=dt,
                 T=T,
@@ -273,6 +273,7 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 self.cache["phase_coefficients"],  # 1PAT1R modification
                 self.cache["ls_all"],  # 1PAT1R modification
                 self.cache["ms_all"],  # 1PAT1R modification
+                self.cache["ks_all"],  # 1PAT1R modification: k_arr now required by InterpolatedModeSum
                 self.cache["ns_all"],  # 1PAT1R modification
                 dt=dt,  # 1PAT1R modification
                 T=T,  # 1PAT1R modification
@@ -416,7 +417,7 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 phase_coefficients,
                 self.cache["ls_all"],
                 self.cache["ms_all"],
-                # self.cache['ks_all'],
+                self.cache["ks_all"],  # 1PAT1R modification: k_arr now required by InterpolatedModeSum
                 self.cache["ns_all"],
                 dt=dt,
                 T=T,
@@ -678,7 +679,9 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
             self.cache["ms_all"] = self.xp.concatenate(
                 (self.ms, -self.ms[m0mask]), axis=0
             )
-
+            self.cache["ks_all"] = self.xp.concatenate(  # 1PAT1R modification: k_arr now required by InterpolatedModeSum
+                (self.ks, -self.ks[m0mask]), axis=0
+            )
             self.cache["ns_all"] = self.xp.concatenate(
                 (self.ns, -self.ns[m0mask]), axis=0
             )
@@ -755,6 +758,7 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
         phase_coeffs,
         ls,
         ms,
+        ks,  # 1PAT1R modification: k_arr now required by InterpolatedModeSum
         ns,
         dt,
         T,
@@ -798,6 +802,7 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 phase_coeffs,
                 l_arr=ls,
                 m_arr=ms,
+                k_arr=ks,  # 1PAT1R modification: now required by InterpolatedModeSum
                 n_arr=ns,
                 dt=dt,
                 T=T,
