@@ -669,16 +669,6 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
             # perform mode selection in the first call (with cache=True)
             mode_selection = None
 
-            fund_freq_args = (
-                parameters["m1"],
-                parameters["m2"],
-                parameters["a"],
-                y[0],
-                y[1],
-                y[2],
-                t,
-            )
-
             modeinds = [self.l_arr, self.m_arr, self.n_arr]
 
             # 1PAT1R modification: strip keys that mode_selector does not accept.
@@ -696,7 +686,6 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 teuk_modes,
                 ylms,
                 modeinds,
-                fund_freq_args=fund_freq_args,
                 mode_selection=mode_selection,  # None
                 **_mode_sel_kwargs,  # 1PAT1R modification
             )
