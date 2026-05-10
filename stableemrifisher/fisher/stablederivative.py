@@ -129,7 +129,7 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 "parameters": parameters,
                 "chi2": _cache_chi2,           # 1PAT1R modification: part of cache key
                 "evolve_primary": _cache_evolve,  # 1PAT1R modification: part of cache key
-                "coefficients": self.inspiral_generator.integrator_spline_coeff,
+                "coefficients": self.inspiral_generator.inspiral_generator.integrator_spline_coeff,
                 # 1PAT1R modification: FEW-dev exposes a single spline coefficient
                 # array (integrator_spline_coeff, shape (N-1, nparams, 8)) rather
                 # than a separate integrator_spline_phase_coeff attribute.  Phase
@@ -139,11 +139,11 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 # downstream dPhi_dx projection (which expects a 2-column array
                 # at indices [0, 2] = Phi_phi, Phi_r) remains unchanged.
                 "phase_coefficients": self.xp.asarray(
-                    self.inspiral_generator.integrator_spline_coeff
+                    self.inspiral_generator.inspiral_generator.integrator_spline_coeff
                 )[:, [3, 5], :],  # 1PAT1R modification: was integrator_spline_phase_coeff[:, [0,2], :]
                 # 1PAT1R modification: FEW-dev names this attribute integrator_t_cache,
                 # not integrator_spline_t.
-                "phase_coefficients_t": self.inspiral_generator.integrator_t_cache,  # 1PAT1R modification
+                "phase_coefficients_t": self.inspiral_generator.inspiral_generator.integrator_t_cache,  # 1PAT1R modification
             }
 
             amps_here = self._amplitudes_from_trajectory(
