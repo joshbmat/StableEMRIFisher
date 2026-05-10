@@ -62,25 +62,10 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
         if self.order not in [2, 4, 6, 8]:
             raise ValueError("order must be one of 2, 4, 6, or 8.")
 
-        try:
-            T = kwargs["T"]
-        except KeyError:
-            T = 1.0
-
-        try:
-            dt = kwargs["dt"]
-        except KeyError:
-            dt = 10.0
-
-        try:
-            batch_size = kwargs["batch_size"]
-        except KeyError:
-            batch_size = -1
-
-        try:
-            show_progress = kwargs["show_progress"]
-        except KeyError:
-            show_progress = False
+        T = kwargs.get("T", 1.0)
+        dt = kwargs.get("dt", 10.0)
+        batch_size = kwargs.get("batch_size", -1)
+        show_progress = kwargs.get("show_progress", False)
 
         # construct deltas for derivative
         self.deltas = self._deltas(self.delta, self.order, self.kind)
@@ -129,21 +114,15 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 "parameters": parameters,
                 "chi2": _cache_chi2,           # 1PAT1R modification: part of cache key
                 "evolve_primary": _cache_evolve,  # 1PAT1R modification: part of cache key
-                "coefficients": self.inspiral_generator.inspiral_generator.integrator_spline_coeff,
-                # 1PAT1R modification: FEW-dev exposes a single spline coefficient
-                # array (integrator_spline_coeff, shape (N-1, nparams, 8)) rather
-                # than a separate integrator_spline_phase_coeff attribute.  Phase
-                # components sit at parameter indices 3 (Phi_phi) and 5 (Phi_r)
-                # for both the eccentric (nparams=6) and circular 1PAT1R
-                # (nparams=8) models.  We extract those two columns here so the
-                # downstream dPhi_dx projection (which expects a 2-column array
-                # at indices [0, 2] = Phi_phi, Phi_r) remains unchanged.
+                "coefficients": self.inspiral_generator.integrator_spline_coeff,
+                # 1PAT1R modification: use EMRIInspiral.integrator_spline_phase_coeff
+                # property which extracts columns [3:6] (Phi_phi, Phi_theta, Phi_r)
+                # and normalises by massratio. Downstream dPhi_dx uses [:,[0,2],:] =
+                # Phi_phi and Phi_r, which is correct for both eccentric and circular.
                 "phase_coefficients": self.xp.asarray(
-                    self.inspiral_generator.inspiral_generator.integrator_spline_coeff
-                )[:, [3, 5], :],  # 1PAT1R modification: was integrator_spline_phase_coeff[:, [0,2], :]
-                # 1PAT1R modification: FEW-dev names this attribute integrator_t_cache,
-                # not integrator_spline_t.
-                "phase_coefficients_t": self.inspiral_generator.inspiral_generator.integrator_t_cache,  # 1PAT1R modification
+                    self.inspiral_generator.integrator_spline_phase_coeff
+                ),  # 1PAT1R modification
+                "phase_coefficients_t": self.inspiral_generator.integrator_spline_t,  # 1PAT1R modification
             }
 
             amps_here = self._amplitudes_from_trajectory(
@@ -643,51 +622,40 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
             delta_chit1 = y[7]  # 1PAT1R modification
             delta_m1 = y[6]  # 1PAT1R modification
             chit = chit1_0 + delta_chit1  # 1PAT1R modification: total evolving reduced primary spin
-            teuk_modes = self.xp.asarray(
-                self.amplitude_generator(
-                    parameters["a"],
-                    *y[:3],             # p, e, xI along trajectory
-                    nu=nu,              # 1PAT1R modification
-                    chit2=chit2,        # 1PAT1R modification
-                    chit=chit,          # 1PAT1R modification
-                    delta_m1=delta_m1,  # 1PAT1R modification
-                    zero_PA_amps_only=kwargs.get("zero_PA_amps_only", False),  # 1PAT1R modification
-                )
-            )
+            _1pa_amp_kwargs = dict(  # 1PAT1R modification
+                nu=nu, chit2=chit2, chit=chit, delta_m1=delta_m1,  # 1PAT1R modification
+                zero_PA_amps_only=kwargs.get("zero_PA_amps_only", False),  # 1PAT1R modification
+            )  # 1PAT1R modification
         else:
-            # standard (non-1PA) amplitude call
-            teuk_modes = self.xp.asarray(
-                self.amplitude_generator(parameters["a"], *y[:3])
-            )
-
-        # ylms
-        ylms = self.ylm_gen(self.unique_l, self.unique_m, theta_source, phi_source).copy()[
-            self.inverse_lm
-        ]
+            _1pa_amp_kwargs = {}
 
         if cache:
             # perform mode selection in the first call (with cache=True)
             mode_selection = None
-
-            modeinds = [self.l_arr, self.m_arr, self.n_arr]
 
             # 1PAT1R modification: strip keys that mode_selector does not accept.
             _mode_sel_kwargs = {
                 k: v for k, v in kwargs.items()
                 if k not in {"chi2", "evolve_primary", "zero_PA_amps_only"}
             }
+
+            # 1PAT1R modification: new ModeSelector API takes trajectory quantities
+            # directly and handles amplitude computation internally.
             (
                 teuk_modes_in,
                 ylms_in,
                 self.ls,
                 self.ms,
+                self.ks,  # 1PAT1R modification: ModeSelector returns 6 values including k_arr
                 self.ns,
             ) = self.mode_selector(
-                teuk_modes,
-                ylms,
-                modeinds,
-                mode_selection=mode_selection,  # None
-                **_mode_sel_kwargs,  # 1PAT1R modification
+                t,
+                parameters["a"],
+                y[0], y[1], y[2],  # p, e, xI
+                theta_source, phi_source,
+                mode_selection=mode_selection,
+                **_1pa_amp_kwargs,  # 1PAT1R modification: nu, chit2, chit, delta_m1
+                **_mode_sel_kwargs,
             )
 
             # we don't use mode symmetry
@@ -717,6 +685,7 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
 
             self.cache["ls"] = self.ls.copy()
             self.cache["ms"] = self.ms.copy()
+            self.cache["ks"] = self.ks.copy()  # 1PAT1R modification: k_arr from ModeSelector
             self.cache["ns"] = self.ns.copy()
 
             self.cache["mode_selection"] = [
@@ -747,10 +716,22 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
             return self.cache["teuk_modes_with_ylms"]
 
         else:
+            # non-cache branch: compute amplitudes directly and select cached modes
+            if self._is_1PA:  # 1PAT1R modification
+                teuk_modes = self.xp.asarray(
+                    self.amplitude_generator(
+                        parameters["a"], *y[:3],
+                        **_1pa_amp_kwargs,
+                    )
+                )
+            else:
+                teuk_modes = self.xp.asarray(
+                    self.amplitude_generator(parameters["a"], *y[:3])
+                )
 
             teuk_modes_in = teuk_modes[
                 :, self.cache["keep_inds"]
-            ]  # same modes as in the first run, the amplitudes are just different
+            ]  # same modes as in the first run, amplitudes are different
 
             teuk_modes_in = self.xp.concatenate(
                 (
@@ -761,9 +742,7 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 axis=1,
             )  # get the negative m modes as well
 
-            ylms_in = self.cache[
-                "ylms_in"
-            ].copy()  # already calculated in the first run, so just copy it
+            ylms_in = self.cache["ylms_in"].copy()
 
             return teuk_modes_in * ylms_in / dist_dimensionless
 
