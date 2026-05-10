@@ -2,6 +2,7 @@ import numpy as np
 from few.waveform import GenerateEMRIWaveform
 from few.utils.constants import Gpc, MRSUN_SI
 from tqdm import tqdm
+from few.utils.mappings.common import chi_to_chit  # 1PAT1R modification
 
 from ..deriv_utils.deriv_angles import viewing_angle_partials, fplus_fcross_derivs
 
@@ -31,6 +32,8 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
             **kwargs,
         )  # initialize GenerateEMRIWaveform
         self.cache = None  # initialize waveform cache
+        # 1PAT1R modification: cached once — descriptor is fixed at construction time.
+        self._is_1PA = getattr(self.waveform_generator, "descriptor", "") == "circular"
 
     def __getattr__(self, name):
         # get_attributes from self.waveform_generator if not found in GenerateEMRIWaveform
@@ -83,7 +86,9 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
         self.deltas = self._deltas(self.delta, self.order, self.kind)
 
         # how we proceed depends on the parameter we are differentiating with respect to
-        if param_to_vary not in parameters:
+        # 1PAT1R modification: chi2 is carried in kwargs (current_waveform_kwargs),
+        # not in the positional parameters dict, so exempt it from this check.
+        if param_to_vary not in parameters and param_to_vary != "chi2":  # 1PAT1R modification
             raise ValueError(
                 f"Parameter '{param_to_vary}' not in parameters dictionary."
             )
@@ -97,21 +102,48 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
         kwargs_remaining = {
             key: value for key, value in kwargs.items() if key not in keys_exclude
         }
+        # 1PAT1R modification: chi2 and evolve_primary are trajectory/amplitude
+        # kwargs that must not be forwarded to create_waveform. Strip them here
+        # into a separate dict used only where needed.
+        _waveform_keys_exclude = {"chi2", "evolve_primary"}
+        kwargs_waveform = {k: v for k, v in kwargs_remaining.items() if k not in _waveform_keys_exclude}
 
         # get waveform
-        if self.cache is None or parameters != self.cache["parameters"]:
+        # 1PAT1R modification: include chi2 and evolve_primary from kwargs in the
+        # cache key so that changes between calls correctly invalidate the cache.
+        _cache_chi2 = kwargs_remaining.get("chi2", None)  # 1PAT1R modification
+        _cache_evolve = kwargs_remaining.get("evolve_primary", None)  # 1PAT1R modification
+        _cache_key_matches = (  # 1PAT1R modification
+            self.cache is not None  # 1PAT1R modification
+            and parameters == self.cache["parameters"]  # 1PAT1R modification
+            and _cache_chi2 == self.cache.get("chi2", None)  # 1PAT1R modification
+            and _cache_evolve == self.cache.get("evolve_primary", None)  # 1PAT1R modification
+        )  # 1PAT1R modification
+        if not _cache_key_matches:  # 1PAT1R modification
 
-            t, y = self._trajectory_from_parameters(parameters, T)
+            t, y = self._trajectory_from_parameters(parameters, T, **kwargs_remaining)
 
             self.cache = {
                 "t": t,
                 "y": y,
                 "parameters": parameters,
+                "chi2": _cache_chi2,           # 1PAT1R modification: part of cache key
+                "evolve_primary": _cache_evolve,  # 1PAT1R modification: part of cache key
                 "coefficients": self.inspiral_generator.integrator_spline_coeff,
+                # 1PAT1R modification: FEW-dev exposes a single spline coefficient
+                # array (integrator_spline_coeff, shape (N-1, nparams, 8)) rather
+                # than a separate integrator_spline_phase_coeff attribute.  Phase
+                # components sit at parameter indices 3 (Phi_phi) and 5 (Phi_r)
+                # for both the eccentric (nparams=6) and circular 1PAT1R
+                # (nparams=8) models.  We extract those two columns here so the
+                # downstream dPhi_dx projection (which expects a 2-column array
+                # at indices [0, 2] = Phi_phi, Phi_r) remains unchanged.
                 "phase_coefficients": self.xp.asarray(
-                    self.inspiral_generator.integrator_spline_phase_coeff
-                )[:, [0, 2], :],
-                "phase_coefficients_t": self.inspiral_generator.integrator_spline_t,
+                    self.inspiral_generator.integrator_spline_coeff
+                )[:, [3, 5], :],  # 1PAT1R modification: was integrator_spline_phase_coeff[:, [0,2], :]
+                # 1PAT1R modification: FEW-dev names this attribute integrator_t_cache,
+                # not integrator_spline_t.
+                "phase_coefficients_t": self.inspiral_generator.integrator_t_cache,  # 1PAT1R modification
             }
 
             amps_here = self._amplitudes_from_trajectory(
@@ -125,7 +157,6 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
             )
 
             # create waveform at injection
-
             waveform_source = self._create_waveform_in_batches(
                 self.cache["t"],
                 amps_here,  # actually teuk_amps * Ylms_in
@@ -140,7 +171,7 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 T=T,
                 batch_size=batch_size,
                 show_progress=show_progress,
-                **kwargs_remaining,
+                **kwargs_waveform,
             )
 
             self.cache["waveform_source"] = waveform_source
@@ -177,9 +208,8 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 T=T,
                 batch_size=batch_size,
                 show_progress=show_progress,
-                **kwargs_remaining,
+                **kwargs_waveform,
             )
-            # breakpoint()
 
         # sky angles (SSB)
         elif param_to_vary in ["qS", "phiS", "qK", "phiK"]:
@@ -205,8 +235,72 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 T=T,
                 batch_size=batch_size,
                 show_progress=show_progress,
-                **kwargs_remaining,
+                **kwargs_waveform,
             )
+
+        # 1PAT1R modification: chi2 (secondary spin) enters only the amplitude,
+        # not the trajectory phase. The inspiral trajectory is independent of
+        # chi2 at the ODE level (chi2 is stored in Trajectory1PAT1R.args and
+        # affects the flux, but _trajectory_from_parameters already ran with the
+        # correct chi2 for the injection point). We therefore skip the trajectory
+        # perturbation loop entirely and finite-difference only the amplitudes
+        # at the cached (unperturbed) trajectory.
+        #
+        # We use the dense spline-interpolated trajectory (evaluated at the
+        # waveform time grid self.cache["t"]) rather than the sparse ODE output
+        # self.cache["y"], because _amplitudes_from_trajectory expects a trajectory
+        # with the same number of time steps as the waveform.
+        elif param_to_vary == "chi2":  # 1PAT1R modification
+            base_chi2 = kwargs_remaining.get("chi2", 0.0)  # 1PAT1R modification
+            t_interp = self.cache["t"]  # 1PAT1R modification
+
+            # Evaluate the spline at the dense waveform time grid to get y_dense,
+            # shape (nparams, N_t), matching what _amplitudes_from_trajectory expects.
+            use_gpu = self.waveform_generator.backend.uses_cupy  # 1PAT1R modification
+            if use_gpu:  # 1PAT1R modification
+                t_interp_np = t_interp.get()  # 1PAT1R modification
+            else:  # 1PAT1R modification
+                t_interp_np = t_interp  # 1PAT1R modification
+            y_dense = self.xp.asarray(  # 1PAT1R modification
+                self.inspiral_generator.inspiral_generator.eval_integrator_spline(  # 1PAT1R modification
+                    t_interp_np  # 1PAT1R modification
+                ).T  # 1PAT1R modification
+            )  # shape (nparams, N_t)  # 1PAT1R modification
+
+            amps_steps = self.xp.zeros(  # 1PAT1R modification
+                (len(self.deltas), len(t_interp), len(self.cache["ls_all"])),  # 1PAT1R modification
+                dtype=self.xp.complex128,  # 1PAT1R modification
+            )  # 1PAT1R modification
+
+            for k, delt in enumerate(self.deltas):  # 1PAT1R modification
+                kwargs_in = {**kwargs_remaining, "chi2": base_chi2 + delt}  # 1PAT1R modification
+                amps_steps[k] = self._amplitudes_from_trajectory(  # 1PAT1R modification
+                    parameters,  # 1PAT1R modification
+                    t_interp,  # 1PAT1R modification
+                    y_dense,  # 1PAT1R modification: dense trajectory, not sparse ODE output
+                    theta_source=float(theta_source),  # 1PAT1R modification
+                    phi_source=phi_source,  # 1PAT1R modification
+                    cache=False,  # 1PAT1R modification
+                    **kwargs_in,  # 1PAT1R modification
+                )  # 1PAT1R modification
+
+            dAmp_dchi2 = self._stencil(amps_steps, self.delta, self.order, self.kind)  # 1PAT1R modification
+
+            waveform_derivative_source = self._create_waveform_in_batches(  # 1PAT1R modification
+                t_interp,  # 1PAT1R modification
+                dAmp_dchi2,  # 1PAT1R modification
+                self.cache["dummy_ylms"],  # 1PAT1R modification
+                self.cache["phase_coefficients_t"],  # 1PAT1R modification
+                self.cache["phase_coefficients"],  # 1PAT1R modification
+                self.cache["ls_all"],  # 1PAT1R modification
+                self.cache["ms_all"],  # 1PAT1R modification
+                self.cache["ns_all"],  # 1PAT1R modification
+                dt=dt,  # 1PAT1R modification
+                T=T,  # 1PAT1R modification
+                batch_size=batch_size,  # 1PAT1R modification
+                show_progress=show_progress,  # 1PAT1R modification
+                **kwargs_waveform,  # 1PAT1R modification
+            )  # 1PAT1R modification
 
         # traj params
         else:
@@ -220,29 +314,26 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 (len(self.deltas), self.cache["t"].size, len(self.cache["y"])),
                 self.xp.nan,
             )  # trajectory for each of the finite difference deltas
-            t_interp = self.cache["t"].copy()  # CHANGED
+            t_interp = self.cache["t"].copy()
             if use_gpu:
-                t_interp_np = t_interp.get()  # Changed!
+                t_interp_np = t_interp.get()
             else:
                 t_interp_np = t_interp
 
             for k, delt in enumerate(self.deltas):
                 parameters_in = parameters.copy()
                 parameters_in[param_to_vary] += delt  # perturb by finite-difference
-                t, y = self._trajectory_from_parameters(parameters_in, T)
+                t, y = self._trajectory_from_parameters(parameters_in, T, **kwargs_remaining)
                 # re-interpolate onto the time-step grid for the injection trajectory
-                # t_interp_np = np.asarray(t_interp) # Changed!
 
                 if self.xp.around(t_interp[-1], 5) > self.xp.around(
                     t[-1], 5
-                ):  # check plunge. We round to five decimal places to avoid numerical precision errors (which sometimes happen otherwise).
+                ):  # check plunge
                     print("plunging! t_interp: ", t_interp[-1], "t_traj: ", t[-1])
 
                     mask_notplunging = (
                         t_interp < t[-1]
                     )  # for all t_interp < t[-1], the perturbed trajectory is still not plunging
-                    # t_interp_np = t_interp[mask_notplunging].get() # CHANGED
-                    # t_interp_np = np.asarray(t_interp[mask_notplunging]) # CHANGED
                     if use_gpu:
                         t_interp_np = t_interp[mask_notplunging].get()
                     else:
@@ -252,15 +343,15 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                     self.inspiral_generator.inspiral_generator.eval_integrator_spline(
                         t_interp_np
                     ).T
-                )  # any unfilled elements due to plunging trajectories assume nans. # CHANGED
-                y_interps[k, : len(t_interp_np)] = y_interp.T  # CHANGED
+                )  # any unfilled elements due to plunging trajectories assume nans.
+                y_interps[k, : len(t_interp_np)] = y_interp.T
 
             # In the case of plunge, some trajectories will be shorter than others. They appear as NaN's in the y_interps array
             nans = self.xp.isnan(y_interps)
             if nans.any():
                 max_ind = int(self.xp.where(nans.sum(2).sum(0) > 0)[0].min())
             else:
-                max_ind = int(y_interp.shape[1])
+                max_ind = len(t_interp_np)
 
             # modify size of the trajectories and phases accordingly
             t_interp = self.cache["t"][:max_ind]
@@ -322,11 +413,6 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                     self.frame == "detector"
                 ):  # assuming waveform_generator is always in source frame.
 
-                    # wave_amps = A * Y / dist_dimless when final output is in detector frame
-                    # => partial wave_amps / partial m = partial A / partial m * (Y / dist_dimless) - A * Y / (dist_dimless ** 2) * partial dist_dimless / partial m
-                    # partial dist_dimless / partial m = - d_in * Gpc / (mu**2 * M_odot) partial mu / partial m = -dist_dimless/mu * (m **2 / (M ** 2))
-                    # => partial wave_amps / partial m = dAmp_dx + wave_amps / mu * (m ** 2 / (M ** 2))
-
                     mu = (
                         parameters["m1"]
                         * parameters["m2"]
@@ -357,7 +443,7 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 T=T,
                 batch_size=batch_size,
                 show_progress=show_progress,
-                **kwargs_remaining,
+                **kwargs_waveform,
             )
 
             # pad with zeroes if required to get back to the waveform length
@@ -453,50 +539,51 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
     def clear_cache(self):
         self.cache = None  # reset cache
 
-    def _trajectory_from_parameters(self, parameters, T):
+    def _trajectory_from_parameters(self, parameters, T, **kwargs):
         """
         calculate the inspiral trajectory over time T (years) for a given set of parameters.
 
         Args:
             parameters (dict): dictionary of parameters with the param name as key and its value as value.
             T (float): time (in years) for the inspiral trajectory
+            **kwargs: additional keyword arguments; ``evolve_primary`` (bool) is
+                read here and forwarded as ``additional_args[1]`` to
+                ``Trajectory1PAT1R`` when present.
         Returns:
             t (np.ndarray): time steps (in seconds) of the trajectory
             y (np.ndarray): evolving parameters of the trajectory along the time grid
         """
 
-        add_parameters = []
-        for key, value in parameters.items():
-            if key not in [
-                "m1",
-                "m2",
-                "a",
-                "p0",
-                "e0",
-                "xI0",
-                "Phi_phi0",
-                "Phi_theta0",
-                "Phi_r0",
-                "dist",
-                "qS",
-                "phiS",
-                "qK",
-                "phiK",
-            ]:
+        # Keys that are standard positional args to inspiral_generator or are
+        # handled explicitly below (chi2) — everything else becomes additional_args.
+        _STANDARD_KEYS = {
+            "m1", "m2", "a", "p0", "e0", "xI0",
+            "Phi_phi0", "Phi_theta0", "Phi_r0",
+            "dist", "qS", "phiS", "qK", "phiK",
+            "chi2",  # 1PAT1R modification: forwarded explicitly below
+        }
+        add_parameters = [v for k, v in parameters.items() if k not in _STANDARD_KEYS]
 
-                add_parameters.append(value)
+        # 1PAT1R modification: build additional_args = [chi2, evolve_primary?, ...]
+        # chi2 is positional additional_args[0]; evolve_primary, if supplied via
+        # kwargs, is additional_args[1] (Trajectory1PAT1R defaults it to True).
+        chi2_val = parameters.get("chi2", None)
+        if chi2_val is not None:
+            evolve_primary = kwargs.get("evolve_primary", None)
+            prefix = [chi2_val, evolve_primary] if evolve_primary is not None else [chi2_val]
+            add_parameters = prefix + add_parameters
 
         traj = self.inspiral_generator(
             parameters["m1"],
             parameters["m2"],
             parameters["a"],
             parameters["p0"],
-            parameters["e0"],
-            parameters["xI0"],
-            *add_parameters,  # any extra trajectory parameters
+            parameters.get("e0", 0.0),   # 1PAT1R modification: default to circular
+            parameters.get("xI0", 1.0),  # 1PAT1R modification: default to equatorial prograde
+            *add_parameters,              # any extra trajectory parameters (e.g. chi2)
             Phi_phi0=parameters["Phi_phi0"],
-            Phi_theta0=parameters["Phi_theta0"],
-            Phi_r0=parameters["Phi_r0"],
+            Phi_theta0=parameters.get("Phi_theta0", 0.0),  # 1PAT1R modification: not used in circular
+            Phi_r0=parameters.get("Phi_r0", 0.0),          # 1PAT1R modification: not used in circular
             T=T,
             **self.inspiral_kwargs,
         )  # generate the trajectory
@@ -539,10 +626,39 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
         else:
             dist_dimensionless = 1.0
 
-        # amplitudes
-        teuk_modes = self.xp.asarray(
-            self.amplitude_generator(parameters["a"], *y[:3])
-        )  # these are all the Teukolsky amplitudes for the trajectory
+        # 1PAT1R modification: AmpInterp1PAT1R requires nu, chit2, chit, and
+        # delta_m1 in addition to (a, p, e, xI). self._is_1PA is set at
+        # construction time from the waveform descriptor.
+        if self._is_1PA:
+            # Trajectory1PAT1R state vector layout (y rows after t):
+            #   y[0]=p, y[1]=e, y[2]=xI, y[3]=Phi_phi, y[4]=Phi_theta,
+            #   y[5]=Phi_r, y[6]=deltaM, y[7]=delta_chit1
+            nu = (  # 1PAT1R modification
+                parameters["m1"] * parameters["m2"]
+                / (parameters["m1"] + parameters["m2"]) ** 2
+            )
+            chi2_val = kwargs.get("chi2", parameters.get("chi2", 0.0))  # 1PAT1R modification: kwargs takes priority so chi2 derivative branch can perturb it
+            chi1_val = parameters["a"]  # 1PAT1R modification
+            chit1_0, chit2 = chi_to_chit(chi1_val, chi2_val, nu)  # 1PAT1R modification
+            delta_chit1 = y[7]  # 1PAT1R modification
+            delta_m1 = y[6]  # 1PAT1R modification
+            chit = chit1_0 + delta_chit1  # 1PAT1R modification: total evolving reduced primary spin
+            teuk_modes = self.xp.asarray(
+                self.amplitude_generator(
+                    parameters["a"],
+                    *y[:3],             # p, e, xI along trajectory
+                    nu=nu,              # 1PAT1R modification
+                    chit2=chit2,        # 1PAT1R modification
+                    chit=chit,          # 1PAT1R modification
+                    delta_m1=delta_m1,  # 1PAT1R modification
+                    zero_PA_amps_only=kwargs.get("zero_PA_amps_only", False),  # 1PAT1R modification
+                )
+            )
+        else:
+            # standard (non-1PA) amplitude call
+            teuk_modes = self.xp.asarray(
+                self.amplitude_generator(parameters["a"], *y[:3])
+            )
 
         # ylms
         ylms = self.ylm_gen(self.unique_l, self.unique_m, theta_source, phi_source).copy()[
@@ -550,9 +666,8 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
         ]
 
         if cache:
-            # perform mode selection in the first call (with cache=True))
+            # perform mode selection in the first call (with cache=True)
             mode_selection = None
-            # get teuk amplitudes, ylms, ls, ms, ks, and ns from the mode_selector module.
 
             fund_freq_args = (
                 parameters["m1"],
@@ -566,6 +681,11 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
 
             modeinds = [self.l_arr, self.m_arr, self.n_arr]
 
+            # 1PAT1R modification: strip keys that mode_selector does not accept.
+            _mode_sel_kwargs = {
+                k: v for k, v in kwargs.items()
+                if k not in {"chi2", "evolve_primary", "zero_PA_amps_only"}
+            }
             (
                 teuk_modes_in,
                 ylms_in,
@@ -578,7 +698,7 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 modeinds,
                 fund_freq_args=fund_freq_args,
                 mode_selection=mode_selection,  # None
-                **kwargs,
+                **_mode_sel_kwargs,  # 1PAT1R modification
             )
 
             # we don't use mode symmetry
@@ -602,20 +722,12 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
                 (self.ms, -self.ms[m0mask]), axis=0
             )
 
-            ######### NO INCLINATION IN FEW 2.0 :( ################
-            # self.cache['ks_all'] = self.xp.concatenate(
-            #    (self.ks, -self.ks[m0mask]),
-            #    axis=0
-            # )
-            #######################################################
-
             self.cache["ns_all"] = self.xp.concatenate(
                 (self.ns, -self.ns[m0mask]), axis=0
             )
 
             self.cache["ls"] = self.ls.copy()
             self.cache["ms"] = self.ms.copy()
-            # self.cache['ks'] = self.ks.copy()
             self.cache["ns"] = self.ns.copy()
 
             self.cache["mode_selection"] = [
@@ -684,13 +796,6 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
     ):
         """
         A wrapper for self.create_waveform that handles batching over the time axis.
-
-        Args:
-            All arguments are the same as those expected by the underlying
-            summation module (e.g., InterpolatedModeSum).
-
-        Returns:
-            The full, assembled waveform as a single array.
         """
         # split into batches
         if batch_size == -1 or self.allow_batching is False:
@@ -706,7 +811,6 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
 
             inds_split_all = self.xp.split(self.xp.arange(len(t)), split_inds)
 
-        # select tqdm if user wants to see progress
         iterator = enumerate(inds_split_all)
         iterator = (
             tqdm(iterator, desc="time batch", total=len(inds_split_all))
@@ -715,12 +819,9 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
         )
 
         for i, inds_in in iterator:
-            # get subsection of the arrays for each batch
             t_batch = t[inds_in]
             amps_batch = amps[inds_in]
 
-            # The phase information (spline coefficients) and mode lists are not
-            # time-dependent, so they are passed through unmodified.
             waveform_batch = self.create_waveform(
                 t_batch,
                 amps_batch,
@@ -745,11 +846,6 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
     def _modify_amplitudes_for_initial_phase_derivative(self, param_to_vary):
         """
         calculates modified amplitudes for phase derivatives.
-
-        Args:
-            param_to_vary (string): one of "Phi_phi0", "Phi_theta0", "Phi_r0"
-        returns
-            modified amplitudes = -i (mode_index) A
         """
 
         if param_to_vary == "Phi_phi0":
@@ -767,28 +863,16 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
     ):
         """
         calculates modified amplitudes for angle derivatives (qS, phiS, qK, phiK)
-
-        Args:
-            parameters (dict): model parameters
-            param_to_vary (str): one of qS, phiS, qK, phiK: parameter with respect to which to calculate the derivative
-            theta_source (float): polar angle in source frame
-            phi_source (float): azimuthal angle in source frame
-        Returns:
-            modified amplitudes = A * partial Y_lm / partial theta * partial_theta / partial kappa where kappa is the param_to_vary
         """
 
         ylm_temp = self.xp.zeros(
             (len(self.deltas), self.cache["ls_all"].size), dtype=self.xp.complex128
         )
 
-        # first calculate dylm_dtheta
         for k, delt in enumerate(self.deltas):
 
             theta_source_perturb = theta_source + float(delt)
-            phi_source_perturb = (
-                phi_source  # no delta in phi_source because phi_source is fixed!
-            )
-            # get the ylms for this theta
+            phi_source_perturb = phi_source
             ylm_temp[k] = self.ylm_gen(
                 self.cache["ls_all"],
                 self.cache["ms_all"],
@@ -798,7 +882,6 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
 
         dYlm_dtheta = self._stencil(ylm_temp, self.delta, self.order, self.kind)
 
-        # now calculate dtheta_dx where x is the param_to_vary
         if param_to_vary == "qS":
             key_dtheta_dx = "del theta_src / del qS"
         elif param_to_vary == "phiS":
@@ -812,23 +895,16 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
             parameters["qS"], parameters["phiS"], parameters["qK"], parameters["phiK"]
         )[key_dtheta_dx]
 
-        # modify the amplitudes by the derivative of the Ylms
         modified_amps = self.cache["teuk_modes"] * dYlm_dtheta[None, :] * dtheta_dx
 
         return modified_amps
 
     def _deltas(self, delta, order, kind):
         """
-            return the np.ndarray of parameter deltas for a given delta
-
-        Args:
-            delta (float): finite-difference delta
-            order (int): order of derivative. Choose from 2, 4, 6, 8
-            kind (str): kind of derivative. Choose from "central", "forward", "backward"
+        return the np.ndarray of parameter deltas for a given delta
         """
 
         if kind == "central":
-            # symmetric positions around 0, excluding 0
             half = order // 2
             positions = list(range(-half, 0)) + list(range(1, half + 1))
 
@@ -839,11 +915,10 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
             positions = list(range(-order, 1))
 
         return np.array(positions) * delta
-        # return self.xp.asarray(positions) * delta
 
     def _available_stencils(self):
         """
-        Accessed from #Fornberg 1988: https://doi.org/10.1090%2FS0025-5718-1988-0935077-0
+        Accessed from Fornberg 1988: https://doi.org/10.1090%2FS0025-5718-1988-0935077-0
         """
         return {
             "central": {
@@ -888,12 +963,7 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
 
     def _stencil(self, func_steps, delta, order, kind):
         """
-            return the stencil for finite-differences
-
-        Args:
-            func_steps (np.ndarray): array of function at different steps of the finite-difference deltas grid
-            order (int): order of finite-difference derivative. Choose from 2, 4, 6, 8
-            kind (str): kind of finite-difference derivative. Choose from "central", "forward", "backward"
+        return the stencil for finite-differences
         """
 
         return (

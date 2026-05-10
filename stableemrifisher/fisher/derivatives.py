@@ -16,7 +16,6 @@ except:
 # stencils all count from - to +
 # forward stencils start with the zero-delta (i.e. the waveform)
 # backward stencils end with the zero-delta
-# TODO just combine the forward and backward stencils...
 stencils = {
     "central": {
         2: np.asarray([-1 / 2, 1 / 2]),
@@ -48,7 +47,13 @@ stencils = {
 def handle_a_flip(params):
     if params["a"] < 0:
         params["a"] *= -1.0
-        params["Y0"] = -1.0
+        # 1PAT1R modification: use xI0 (inclination cosine) for eccentric-inclined
+        # Kerr models; fall back to Y0 for Schwarzschild-inclined models.
+        # For Waveform1PAT1R neither key is present so this block is a no-op.
+        if "xI0" in params:  # 1PAT1R modification
+            params["xI0"] = -1.0  # 1PAT1R modification
+        else:
+            params["Y0"] = -1.0
     return params
 
 
@@ -75,6 +80,18 @@ def derivative(
     if waveform_kwargs is None:
         waveform_kwargs = {}
 
+    # 1PAT1R modification: chi2 (secondary spin for Waveform1PAT1R) must be
+    # passed as a keyword argument, not positionally, since
+    # GenerateEMRIWaveform.__call__ pops it from kwargs and routes it via
+    # _call_from_generic_interface. StableEMRIFisher already excludes chi2 from
+    # the positional parameters dict (wave_params_positional) and carries it in
+    # current_waveform_kwargs. This pop is a safety net for callers that pass
+    # chi2 in `parameters` directly.
+    parameters = parameters.copy()  # 1PAT1R modification
+    chi2_val = parameters.pop("chi2", None)  # 1PAT1R modification
+    if chi2_val is not None and "chi2" not in waveform_kwargs:  # 1PAT1R modification
+        waveform_kwargs = {**waveform_kwargs, "chi2": chi2_val}  # 1PAT1R modification
+
     order = int(order)
 
     if waveform is None:
@@ -87,6 +104,54 @@ def derivative(
         # Compute derivative analytically for the distance
         derivative = (-1 / parameters["dist"]) * waveform
         return derivative
+
+    # 1PAT1R modification: chi2 is always passed as a kwarg for Waveform1PAT1R;
+    # finite-difference it directly in waveform_kwargs rather than positionally.
+    elif param_to_vary == "chi2":  # 1PAT1R modification
+        temp_kwargs = waveform_kwargs.copy()  # 1PAT1R modification
+        delta_waveforms = []  # 1PAT1R modification
+        base_chi2 = temp_kwargs.get("chi2", 0.0)  # 1PAT1R modification
+
+        if kind == "central":  # 1PAT1R modification
+            for i in range(order // 2, 0, -1):  # 1PAT1R modification
+                temp_kwargs["chi2"] = base_chi2 - i * delta  # 1PAT1R modification
+                wf = xp.asarray(waveform_generator(*list(parameters.values()), **temp_kwargs))  # 1PAT1R modification
+                if (wf.ndim == 1) & (waveform.ndim == 2):  # 1PAT1R modification
+                    wf = xp.asarray([wf.copy() for _ in range(len(waveform))]) / len(waveform)  # 1PAT1R modification
+                delta_waveforms.append(padding(wf, waveform, use_gpu=use_gpu))  # 1PAT1R modification
+            for i in range(1, order // 2 + 1):  # 1PAT1R modification
+                temp_kwargs["chi2"] = base_chi2 + i * delta  # 1PAT1R modification
+                wf = xp.asarray(waveform_generator(*list(parameters.values()), **temp_kwargs))  # 1PAT1R modification
+                if (wf.ndim == 1) & (waveform.ndim == 2):  # 1PAT1R modification
+                    wf = xp.asarray([wf.copy() for _ in range(len(waveform))]) / len(waveform)  # 1PAT1R modification
+                delta_waveforms.append(padding(wf, waveform, use_gpu=use_gpu))  # 1PAT1R modification
+        elif kind == "forward":  # 1PAT1R modification
+            delta_waveforms = [waveform]  # 1PAT1R modification
+            for i in range(1, order + 1):  # 1PAT1R modification
+                temp_kwargs["chi2"] = base_chi2 + i * delta  # 1PAT1R modification
+                wf = xp.asarray(waveform_generator(*list(parameters.values()), **temp_kwargs))  # 1PAT1R modification
+                if (wf.ndim == 1) & (waveform.ndim == 2):  # 1PAT1R modification
+                    wf = xp.asarray([wf.copy() for _ in range(len(waveform))]) / len(waveform)  # 1PAT1R modification
+                delta_waveforms.append(padding(wf, waveform, use_gpu=use_gpu))  # 1PAT1R modification
+        elif kind == "backward":  # 1PAT1R modification
+            delta_waveforms = []  # 1PAT1R modification
+            for i in range(order, 0, -1):  # 1PAT1R modification
+                temp_kwargs["chi2"] = base_chi2 - i * delta  # 1PAT1R modification
+                wf = xp.asarray(waveform_generator(*list(parameters.values()), **temp_kwargs))  # 1PAT1R modification
+                if (wf.ndim == 1) & (waveform.ndim == 2):  # 1PAT1R modification
+                    wf = xp.asarray([wf.copy() for _ in range(len(waveform))]) / len(waveform)  # 1PAT1R modification
+                delta_waveforms.append(padding(wf, waveform, use_gpu=use_gpu))  # 1PAT1R modification
+            delta_waveforms.append(waveform)  # 1PAT1R modification
+
+        try:  # 1PAT1R modification
+            derivative = (  # 1PAT1R modification
+                xp.asarray(stencils[kind][order])[:, None, None]  # 1PAT1R modification
+                * xp.asarray(delta_waveforms)  # 1PAT1R modification
+            ).sum(0) / delta  # 1PAT1R modification
+        except KeyError:  # 1PAT1R modification
+            raise ValueError(f"Order '{order}' of derivative '{kind}' not supported")  # 1PAT1R modification
+        return derivative  # 1PAT1R modification
+
     else:
         # modifying the given parameter
         temp = parameters.copy()
@@ -111,9 +176,9 @@ def derivative(
                 if (waveform_delta.ndim == 1) & (waveform.ndim == 2):
                     waveform_delta = xp.asarray(
                         [waveform_delta.copy() for _ in range(len(waveform))]
-                    ) / len(
-                        waveform
-                    )  # we assume equal strength in all provided channels.
+                    ) / len(waveform)
+
+                waveform_delta = padding(waveform_delta, waveform, use_gpu=use_gpu)
 
                 delta_waveforms.append(waveform_delta)
 
