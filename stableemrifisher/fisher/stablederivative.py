@@ -33,7 +33,7 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
         )  # initialize GenerateEMRIWaveform
         self.cache = None  # initialize waveform cache
         # 1PAT1R modification: cached once — descriptor is fixed at construction time.
-        self._is_1PA = getattr(self.waveform_generator, "descriptor", "") == "circular"
+        self._is_1PA = getattr(self.waveform_generator, "descriptor", "").lower() == "circular"
 
     def __getattr__(self, name):
         # get_attributes from self.waveform_generator if not found in GenerateEMRIWaveform

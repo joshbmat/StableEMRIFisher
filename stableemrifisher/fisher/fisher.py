@@ -138,7 +138,7 @@ class StableEMRIFisher:
 
         # 1PAT1R modification: flag used throughout to enable circular-orbit-specific logic.
         self._is_circular = (  # 1PAT1R modification
-            getattr(waveform_generator.waveform_generator, "descriptor", "") == "circular"  # 1PAT1R modification
+            getattr(waveform_generator.waveform_generator, "descriptor", "").lower() == "circular"  # 1PAT1R modification
         )
 
         self.deriv_type = deriv_type
@@ -398,7 +398,7 @@ class StableEMRIFisher:
                     "dist", "qS", "phiS", "qK", "phiK",
                     "Phi_phi0", "Phi_r0",
                 ]
-            elif EMRI_ORBIT == "circular" and BACKGROUND == "Kerr":
+            elif EMRI_ORBIT.lower() == "circular" and BACKGROUND == "Kerr":
                 # 1PAT1R modification: default parameter set for the quasi-circular
                 # Kerr 1PA model. chi2 is included as a Fisher parameter; it is
                 # routed as a keyword argument inside derivative() and
