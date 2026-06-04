@@ -135,14 +135,17 @@ def inner_product(a, b, PSD, dt, window=None, fmin=None, fmax=None, use_gpu=Fals
 
     # print("fmin: {}, fmax: {}".format(fmin, fmax))
 
-    # frequency cutoff mask
+    # Pad to next power of 2 for efficient cuFFT — near-prime sizes cause
+    # catastrophic slowdown (e.g. 7,889,537 = 29 × 272,053 gives ~20x slowdown).
+    # Zero-padding is equivalent to finer frequency interpolation and does not
+    # change the inner product value meaningfully.
+    length = len(a[0])
+    N_pad = int(2 ** np.ceil(np.log2(length))) if length > 1 else length
+
+    # frequency cutoff mask — computed on the padded frequency grid
     if (fmin != None) or (fmax != None):
 
-        length = len(a[0])
-        freq = xp.fft.rfftfreq(length) / dt
-
-        if use_gpu:
-            freq = freq.get()  # convert to numpy
+        freq = np.fft.rfftfreq(N_pad) / dt  # always numpy for mask logic
 
         if fmin != None:
             mask_min = freq > fmin
@@ -155,26 +158,32 @@ def inner_product(a, b, PSD, dt, window=None, fmin=None, fmax=None, use_gpu=Fals
         elif (fmin == None) and (fmax != None):
             freq_mask = mask_max
         else:
-            freq_mask = xp.logical_and(mask_min, mask_max)
+            freq_mask = np.logical_and(mask_min, mask_max)
 
     else:
-        length = len(a[0])
-        
-        freq = xp.fft.rfftfreq(length) / dt
-
-        freq_mask = np.full(len(freq), True, dtype=bool)
+        freq_mask = np.full(N_pad // 2 + 1, True, dtype=bool)
 
     freq_mask = freq_mask[1:]  # skip the first element corresponding to f = 0.0
 
     a = xp.atleast_2d(a)
     b = xp.atleast_2d(b)
-    PSD = xp.atleast_2d(
-        xp.asarray(PSD)
-    )  # handle passing the same PSD for multiple channels
+    PSD = xp.atleast_2d(xp.asarray(PSD))
 
-    N = a.shape[1]
+    # PSD was evaluated at the original (unpadded) frequency grid.
+    # Interpolate it onto the padded grid so dimensions match.
+    n_psd = PSD.shape[-1]            # original number of freq bins (= length // 2)
+    n_pad_bins = N_pad // 2          # padded number of freq bins
+    if n_psd != n_pad_bins:
+        orig_freqs = np.arange(1, n_psd + 1) / (length * dt)
+        new_freqs  = np.arange(1, n_pad_bins + 1) / (N_pad * dt)
+        PSD_np = PSD.get() if hasattr(PSD, 'get') else np.asarray(PSD)
+        PSD_np = np.stack([
+            np.interp(new_freqs, orig_freqs, PSD_np[c])
+            for c in range(PSD_np.shape[0])
+        ])
+        PSD = xp.asarray(PSD_np)
 
-    df = (N * dt) ** -1
+    df = (N_pad * dt) ** -1
 
     if window is not None:
         window = xp.atleast_2d(xp.asarray(window))
@@ -184,11 +193,11 @@ def inner_product(a, b, PSD, dt, window=None, fmin=None, fmax=None, use_gpu=Fals
         a_in, b_in = a, b
 
     if xp.iscomplexobj(a_in):
-        a_fft_plus = (dt * xp.fft.rfft(a_in.real, axis=-1)[:, 1:])[:, freq_mask]
-        a_fft_cross = (dt * xp.fft.rfft(a_in.imag, axis=-1)[:, 1:])[:, freq_mask]
+        a_fft_plus = (dt * xp.fft.rfft(a_in.real, n=N_pad, axis=-1)[:, 1:])[:, freq_mask]
+        a_fft_cross = (dt * xp.fft.rfft(a_in.imag, n=N_pad, axis=-1)[:, 1:])[:, freq_mask]
 
-        b_fft_plus = (dt * xp.fft.rfft(b_in.real, axis=-1)[:, 1:])[:, freq_mask]
-        b_fft_cross = (dt * xp.fft.rfft(b_in.imag, axis=-1)[:, 1:])[:, freq_mask]
+        b_fft_plus = (dt * xp.fft.rfft(b_in.real, n=N_pad, axis=-1)[:, 1:])[:, freq_mask]
+        b_fft_cross = (dt * xp.fft.rfft(b_in.imag, n=N_pad, axis=-1)[:, 1:])[:, freq_mask]
 
         inner_prod = (
             4
@@ -200,8 +209,8 @@ def inner_product(a, b, PSD, dt, window=None, fmin=None, fmax=None, use_gpu=Fals
         )
 
     else:
-        a_fft = (dt * xp.fft.rfft(a_in, axis=-1)[:, 1:])[:, freq_mask]
-        b_fft = (dt * xp.fft.rfft(b_in, axis=-1)[:, 1:])[:, freq_mask]
+        a_fft = (dt * xp.fft.rfft(a_in, n=N_pad, axis=-1)[:, 1:])[:, freq_mask]
+        b_fft = (dt * xp.fft.rfft(b_in, n=N_pad, axis=-1)[:, 1:])[:, freq_mask]
 
         # Compute inner products over given channels
         inner_prod = 4 * df * ((a_fft.conj() * b_fft).real / PSD[:, freq_mask]).sum()

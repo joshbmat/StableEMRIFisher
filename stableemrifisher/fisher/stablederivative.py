@@ -228,7 +228,8 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
 
             for k, delt in enumerate(self.deltas):
                 parameters_in = parameters.copy()
-                parameters_in[param_to_vary] += delt  # perturb by finite-difference
+                # Cast to Python float: float += numpy.float64 gives numpy.float64 which CuPy rejects
+                parameters_in[param_to_vary] = float(parameters[param_to_vary]) + float(delt)
                 t, y = self._trajectory_from_parameters(parameters_in, T)
                 # re-interpolate onto the time-step grid for the injection trajectory
                 # t_interp_np = np.asarray(t_interp) # Changed!
@@ -292,7 +293,8 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
             for k, delt in enumerate(self.deltas):
 
                 parameters_in = parameters.copy()
-                parameters_in[param_to_vary] += delt  # perturb by finite-difference
+                # Cast to Python float: float += numpy.float64 gives numpy.float64 which CuPy rejects
+                parameters_in[param_to_vary] = float(parameters[param_to_vary]) + float(delt)
                 amps_here = self._amplitudes_from_trajectory(
                     parameters_in,
                     t_interp,
@@ -896,9 +898,8 @@ class StableEMRIDerivative(GenerateEMRIWaveform):
             kind (str): kind of finite-difference derivative. Choose from "central", "forward", "backward"
         """
 
-        return (
-            self.xp.tensordot(
-                self._available_stencils()[kind][order], func_steps, axes=(0, 0)
-            )
-            / delta
-        )
+        # Use the array module of func_steps to ensure consistent types across GPU/CPU
+        import cupy as _cp
+        _xp = _cp.get_array_module(func_steps)
+        _coeffs = _xp.asarray(self._available_stencils()[kind][order])
+        return _xp.tensordot(_coeffs, func_steps, axes=(0, 0)) / delta

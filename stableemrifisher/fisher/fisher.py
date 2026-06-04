@@ -925,7 +925,7 @@ class StableEMRIFisher:
                         parameters_in = self.waveform_derivative_kwargs[
                             "parameters"
                         ].copy()
-                        parameters_in[param_name] += float(delt)
+                        parameters_in[param_name] = float(parameters_in[param_name]) + float(delt)
                         # theta is of the same order as the other
                         # angles, so we use the same deltas.
                         parameters_in_list = list(parameters_in.values())
